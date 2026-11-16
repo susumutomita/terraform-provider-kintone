@@ -1,0 +1,12 @@
+bin/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+.terraformrc.local
+crash.log
+.env
+
+# Local planning notes, not part of the public provider
+docs/tenkacloud-integration.md
