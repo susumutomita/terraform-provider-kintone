@@ -77,7 +77,7 @@ No Terraform Registry release or signed binary distribution exists yet. `susumut
 
 ## Pending settings and concurrency
 
-The official [ACL update documentation](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/update-app-permissions/) warns that writing the live app ACL can publish all preview settings. This provider does **not** use the live ACL PUT: the HTTP client rejects mutations outside `/k/v1/preview/`.
+The official [ACL update documentation](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/update-app-permissions/) warns that writing the live app ACL can publish all preview settings. This provider does **not** use the live ACL PUT: the HTTP client rejects live app-settings mutations. A separate, narrowly allowlisted `POST /k/v1/records.json` primitive exists for synthetic fixture creation; it cannot update ACLs.
 
 For an existing app, the exact flow is:
 
@@ -89,3 +89,7 @@ For an existing app, the exact flow is:
 A revision conflict at any write stops the operation. There is no automatic retry with a newer revision, unguarded revision `-1`, live-ACL shortcut, or automatic revert. A conflict or error after step 2 may leave this provider's partial changes in the preview. Inspect and reconcile them manually; retrying must not publish someone else's changes.
 
 These are optimistic concurrency safeguards, not an exclusive lock or transactional rollback. Fresh creation skips the live comparison because no deployed app exists; nobody else may edit that newly created preview before initial configuration. Existing/imported production apps remain unsuitable for this prototype until real-tenant acceptance covers revision behavior, concurrent UI edits and asynchronous deployment. Mock tests simulate those contracts; they cannot establish the service's real behavior.
+
+## Fixture groundwork
+
+Typed client methods for preview text-field addition and synthetic record insertion are being developed separately from the Terraform resource. See [exercise-fixtures.md](docs/exercise-fixtures.md) for contracts, examples and remaining lifecycle work. They are not yet wired into `kintone_app`, so current HCL does not create fields or records.

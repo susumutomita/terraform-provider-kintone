@@ -75,10 +75,12 @@ func (n *numberString) UnmarshalJSON(b []byte) error {
 	return nil
 }
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, out any) error {
-	// All mutations must target the preview API. A live ACL PUT can also
-	// publish unrelated pending settings; never introduce it as a shortcut.
-	if method != http.MethodGet && !strings.HasPrefix(path, "/k/v1/preview/") {
-		return errors.New("mutating live app endpoints is prohibited; use revision-guarded preview deployment")
+	// App-settings mutations must target preview: a live ACL PUT can publish
+	// unrelated settings. Only the dedicated fixture-record POST is exempt;
+	// records have no preview endpoint. No live PUT/DELETE is permitted.
+	fixtureCreate := method == http.MethodPost && path == "/k/v1/records.json"
+	if method != http.MethodGet && !strings.HasPrefix(path, "/k/v1/preview/") && !fixtureCreate {
+		return errors.New("live mutations are prohibited except explicit fixture record creation")
 	}
 	var body io.Reader
 	if in != nil {
