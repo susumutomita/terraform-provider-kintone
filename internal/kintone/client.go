@@ -142,17 +142,26 @@ func validID(id string) error {
 	return nil
 }
 func (c *Client) CreateApp(ctx context.Context, name string) (string, error) {
+	id, _, err := c.createAppWithRevision(ctx, name)
+	return id, err
+}
+
+func (c *Client) createAppWithRevision(ctx context.Context, name string) (string, string, error) {
 	var r struct {
-		App numberString `json:"app"`
+		App      numberString    `json:"app"`
+		Revision json.RawMessage `json:"revision"`
 	}
-	err := c.do(ctx, "POST", "/k/v1/preview/app.json", nil, map[string]any{"name": name}, &r)
-	if err != nil {
-		return "", err
+	if err := c.do(ctx, "POST", "/k/v1/preview/app.json", nil, map[string]any{"name": name}, &r); err != nil {
+		return "", "", err
 	}
-	if err = validID(string(r.App)); err != nil {
-		return "", errors.New("create response omitted a valid app ID; inspect the tenant before retrying")
+	if validID(string(r.App)) != nil {
+		return "", "", errors.New("create response omitted a valid app ID; inspect the tenant before retrying")
 	}
-	return string(r.App), nil
+	// Parse revision separately so a valid app ID can be checkpointed even when
+	// the server omits or corrupts revision. Never adopt a later preview revision.
+	var revision numberString
+	_ = json.Unmarshal(r.Revision, &revision)
+	return string(r.App), string(revision), nil
 }
 
 type appSettings struct {
@@ -239,10 +248,24 @@ func (c *Client) configure(ctx context.Context, id, name, description string, ri
 			return errors.New("unpublished app settings exist; reconcile them in kintone before applying (deployment would publish all pending changes)")
 		}
 	}
+	return c.configureAtRevision(ctx, id, name, description, rights, string(preview.Revision))
+}
+
+func (c *Client) configureAtRevision(ctx context.Context, id, name, description string, rights json.RawMessage, expectedRevision string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	if err := validateRights(rights); err != nil {
+		return err
+	}
+	if !revisionPattern.MatchString(expectedRevision) {
+		return errors.New("expected revision is required")
+	}
+	var err error
 	var revision struct {
 		Revision numberString `json:"revision"`
 	}
-	if err = c.do(ctx, "PUT", "/k/v1/preview/app/settings.json", nil, map[string]any{"app": id, "name": name, "description": description, "revision": string(preview.Revision)}, &revision); err != nil {
+	if err = c.do(ctx, "PUT", "/k/v1/preview/app/settings.json", nil, map[string]any{"app": id, "name": name, "description": description, "revision": expectedRevision}, &revision); err != nil {
 		return err
 	}
 	if !revisionPattern.MatchString(string(revision.Revision)) {
