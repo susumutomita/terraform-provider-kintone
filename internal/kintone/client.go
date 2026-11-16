@@ -75,6 +75,11 @@ func (n *numberString) UnmarshalJSON(b []byte) error {
 	return nil
 }
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, out any) error {
+	// All mutations must target the preview API. A live ACL PUT can also
+	// publish unrelated pending settings; never introduce it as a shortcut.
+	if method != http.MethodGet && !strings.HasPrefix(path, "/k/v1/preview/") {
+		return errors.New("mutating live app endpoints is prohibited; use revision-guarded preview deployment")
+	}
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
