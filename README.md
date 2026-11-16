@@ -6,7 +6,7 @@ Experimental, unofficial Terraform Plugin Framework provider for **an existing d
 
 `kintone_app` creates a preview app, updates its name/description and complete ordered app ACL, deploys the settings and waits for deployment. Refresh reads deployed settings to expose GUI drift. Import accepts an existing numeric app ID.
 
-This is **not yet a complete TenkaCloud exercise**: form fields, fixture records, record/field ACLs, participant provisioning, per-user grading and TenkaCloud integration are not implemented. No real kintone acceptance tests have been run.
+This is **not yet a complete TenkaCloud exercise**: record/field ACLs, participant provisioning, per-user grading and TenkaCloud integration are not implemented. Optional creation-only text fields and synthetic fixture records are experimental. No real kintone acceptance tests have been run.
 
 ## Safety and ownership
 
@@ -77,7 +77,7 @@ No Terraform Registry release or signed binary distribution exists yet. `susumut
 
 ## Pending settings and concurrency
 
-The official [ACL update documentation](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/update-app-permissions/) warns that writing the live app ACL can publish all preview settings. This provider does **not** use the live ACL PUT: the HTTP client rejects mutations outside `/k/v1/preview/`.
+The official [ACL update documentation](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/update-app-permissions/) warns that writing the live app ACL can publish all preview settings. This provider does **not** use the live ACL PUT: the HTTP client rejects live app-settings mutations. A separate, narrowly allowlisted `POST /k/v1/records.json` primitive exists for synthetic fixture creation; it cannot update ACLs.
 
 For an existing app, the exact flow is:
 
@@ -89,3 +89,11 @@ For an existing app, the exact flow is:
 A revision conflict at any write stops the operation. There is no automatic retry with a newer revision, unguarded revision `-1`, live-ACL shortcut, or automatic revert. A conflict or error after step 2 may leave this provider's partial changes in the preview. Inspect and reconcile them manually; retrying must not publish someone else's changes.
 
 These are optimistic concurrency safeguards, not an exclusive lock or transactional rollback. Fresh creation skips the live comparison because no deployed app exists; nobody else may edit that newly created preview before initial configuration. Existing/imported production apps remain unsuitable for this prototype until real-tenant acceptance covers revision behavior, concurrent UI edits and asynchronous deployment. Mock tests simulate those contracts; they cannot establish the service's real behavior.
+
+## Fixture groundwork
+
+`kintone_app` accepts optional creation-only `initial_fields_json` and `initial_records_json`. The initialization flow carries the creation revision through field addition, settings, ACL and deployment, waits for success, inserts fixtures once, then reads the returned record IDs back to verify every supplied field value. See [exercise-fixtures.md](docs/exercise-fixtures.md) and `examples/main.tf`.
+
+These are **initialization inputs**, not continuously managed fields/records. Refresh does not detect fixture or form drift, and update never reseeds. Changing either input requires resource replacement; default destroy protection blocks it. Even whitespace-only JSON changes can request replacement. `initial_stage` and `initial_record_ids_json` are recovery metadata, not live health or a current data inventory.
+
+Checkpoints update the resource response state, which Terraform receives when the operation returns. They are **not a durable write-ahead log**: a provider/process crash can lose IDs before Terraform stores them. Do not retry blindly. A normal returned error preserves the latest available IDs/stage, but failed creation may be tainted and require manual reconciliation. No automatic resume, rollback, or cleanup exists. Sensitive display of initial records does not encrypt Terraform state; use synthetic data only.

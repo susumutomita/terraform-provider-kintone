@@ -365,3 +365,20 @@ func TestConcurrentEditAtEveryMutationStopsWorkflow(t *testing.T) {
 		})
 	}
 }
+
+func TestFixtureExceptionDoesNotAllowOtherLiveMutations(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) })
+	for _, request := range []struct{ method, path string }{
+		{"PUT", "/k/v1/records.json"}, {"DELETE", "/k/v1/records.json"},
+		{"POST", "/k/v1/record.json"}, {"POST", "/k/v1/app/acl.json"},
+		{"POST", "/k/v1/records.json/"},
+	} {
+		if err := c.do(context.Background(), request.method, request.path, nil, nil, nil); err == nil {
+			t.Fatalf("allowed %s %s", request.method, request.path)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unexpected live request")
+	}
+}

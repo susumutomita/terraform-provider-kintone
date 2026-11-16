@@ -1,0 +1,5 @@
+{
+  "customer_name": {"type":"SINGLE_LINE_TEXT","code":"customer_name","label":"架空顧客名"},
+  "department": {"type":"SINGLE_LINE_TEXT","code":"department","label":"担当部署"},
+  "training_note": {"type":"SINGLE_LINE_TEXT","code":"training_note","label":"演習メモ"}
+}
