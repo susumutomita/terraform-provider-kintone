@@ -296,3 +296,72 @@ func TestOversizedResponseRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLiveMutationRejectedWithoutRequest(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) })
+	for _, method := range []string{"PUT", "POST", "DELETE"} {
+		err := c.do(context.Background(), method, "/k/v1/app/acl.json", nil, map[string]any{"app": "42"}, nil)
+		if err == nil {
+			t.Fatal("live mutation accepted")
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("sent a live mutation")
+	}
+}
+
+// Model an external preview edit just before each mutation. Each API must
+// compare the exact previous revision; no retries, forced deploy or revert.
+func TestConcurrentEditAtEveryMutationStopsWorkflow(t *testing.T) {
+	for _, conflictAt := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("write_%d", conflictAt), func(t *testing.T) {
+			var writes int
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" {
+					if !strings.HasSuffix(r.URL.Path, "settings.json") {
+						t.Error("polled after rejected deploy")
+					}
+					fmt.Fprint(w, `{"revision":"5"}`)
+					return
+				}
+				writes++
+				paths := []string{"/k/v1/preview/app/settings.json", "/k/v1/preview/app/acl.json", "/k/v1/preview/app/deploy.json"}
+				if writes > 3 || r.URL.Path != paths[writes-1] {
+					t.Errorf("unexpected mutation %s", r.URL.Path)
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				var revision any = body["revision"]
+				if writes == 3 {
+					apps, ok := body["apps"].([]any)
+					if !ok || len(apps) != 1 {
+						t.Error("invalid deployment body")
+						w.WriteHeader(500)
+						return
+					}
+					revision = apps[0].(map[string]any)["revision"]
+					if _, ok := body["revert"]; ok {
+						t.Error("must not revert external changes")
+					}
+				}
+				if revision != fmt.Sprint(4+writes) {
+					t.Errorf("unguarded or stale revision: %#v", revision)
+				}
+				if writes == conflictAt {
+					w.WriteHeader(409)
+					fmt.Fprint(w, `{"code":"GAIA_CO02"}`)
+					return
+				}
+				fmt.Fprintf(w, `{"revision":"%d"}`, 5+writes)
+			})
+			err := c.UpdateApp(context.Background(), "42", "new", "", json.RawMessage(`[]`))
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 409 || writes != conflictAt {
+				t.Fatalf("err=%v writes=%d", err, writes)
+			}
+		})
+	}
+}

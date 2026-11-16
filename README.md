@@ -74,3 +74,18 @@ This is an unofficial community prototype, not a Cybozu product or an endorsed i
 Source code is available under the MIT license. Dependencies retain their respective licenses; see THIRD_PARTY_NOTICES.md. This repository does not distribute the Terraform CLI or vendored dependency source/binaries.
 
 No Terraform Registry release or signed binary distribution exists yet. `susumutomita/kintone` is the development source address. Before a release, add generated Registry documentation, signed release artifacts, supported platform verification and real-tenant acceptance tests. A future source-address change requires coordinated configuration and state migration; repository transfer alone does not migrate Registry consumers.
+
+## Pending settings and concurrency
+
+The official [ACL update documentation](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/update-app-permissions/) warns that writing the live app ACL can publish all preview settings. This provider does **not** use the live ACL PUT: the HTTP client rejects mutations outside `/k/v1/preview/`.
+
+For an existing app, the exact flow is:
+
+1. Read preview and live general-settings revisions; stop without writes if they differ.
+2. PUT preview general settings with the preview revision.
+3. PUT preview ACL with the revision returned by step 2.
+4. POST preview deployment with the revision returned by step 3, then poll status.
+
+A revision conflict at any write stops the operation. There is no automatic retry with a newer revision, unguarded revision `-1`, live-ACL shortcut, or automatic revert. A conflict or error after step 2 may leave this provider's partial changes in the preview. Inspect and reconcile them manually; retrying must not publish someone else's changes.
+
+These are optimistic concurrency safeguards, not an exclusive lock or transactional rollback. Fresh creation skips the live comparison because no deployed app exists; nobody else may edit that newly created preview before initial configuration. Existing/imported production apps remain unsuitable for this prototype until real-tenant acceptance covers revision behavior, concurrent UI edits and asynchronous deployment. Mock tests simulate those contracts; they cannot establish the service's real behavior.
