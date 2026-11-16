@@ -1,9 +1,12 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/susumutomita/terraform-provider-kintone/internal/kintone"
+	"io"
 	"strconv"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -33,11 +36,15 @@ var _ resource.ResourceWithImportState = &AppResource{}
 func NewAppResource() resource.Resource { return &AppResource{} }
 
 type appModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Description types.String `tfsdk:"description"`
-	Rights      types.List   `tfsdk:"rights"`
-	Retain      types.Bool   `tfsdk:"retain_on_destroy"`
+	ID               types.String `tfsdk:"id"`
+	Name             types.String `tfsdk:"name"`
+	Description      types.String `tfsdk:"description"`
+	Rights           types.List   `tfsdk:"rights"`
+	Retain           types.Bool   `tfsdk:"retain_on_destroy"`
+	InitialFields    types.String `tfsdk:"initial_fields_json"`
+	InitialRecords   types.String `tfsdk:"initial_records_json"`
+	InitialRecordIDs types.String `tfsdk:"initial_record_ids_json"`
+	InitialStage     types.String `tfsdk:"initial_stage"`
 }
 type rightModel struct {
 	Type        types.String `tfsdk:"entity_type"`
@@ -79,11 +86,15 @@ func (r *AppResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 	b := func(desc string) schema.BoolAttribute {
 		return schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: desc}
 	}
-	resp.Schema = schema.Schema{Description: "Manages app name, description and the complete ordered application ACL. Deploy publishes ALL pending app settings. Exclusive ownership of the preview is required. No fields, records or tenant lifecycle yet. Remote deletion is unsupported.", Attributes: map[string]schema.Attribute{
-		"id":                schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
-		"name":              schema.StringAttribute{Required: true},
-		"description":       schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("")},
-		"retain_on_destroy": b("Explicitly allow Terraform to forget this app while retaining it remotely. Default false blocks destroy, since no documented delete API is implemented. Does not clean up permissions or data."),
+	resp.Schema = schema.Schema{Description: "Manages app name, description and the complete ordered application ACL. Deploy publishes ALL pending app settings. Exclusive ownership of the preview is required. Optional creation-only text fields and synthetic records. No tenant lifecycle or remote deletion.", Attributes: map[string]schema.Attribute{
+		"id":                      schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
+		"initial_fields_json":     schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("[]"), PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Creation-only JSON array of text field definitions (code, label, required, unique). Not reconciled on refresh. Changing this requires replacement, which default destroy protection blocks."},
+		"initial_records_json":    schema.StringAttribute{Optional: true, Computed: true, Sensitive: true, Default: stringdefault.StaticString("[]"), PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Creation-only JSON array of synthetic record objects. Stored in state despite sensitive display. Never use customer data. Not reseeded on update."},
+		"initial_record_ids_json": schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "JSON IDs recorded during initial fixture insertion. Not a current data inventory."},
+		"initial_stage":           schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Last checkpoint of initialization; not a health check. Failed initialization requires manual reconciliation, not automatic retry."},
+		"name":                    schema.StringAttribute{Required: true},
+		"description":             schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("")},
+		"retain_on_destroy":       b("Explicitly allow Terraform to forget this app while retaining it remotely. Default false blocks destroy, since no documented delete API is implemented. Does not clean up permissions or data."),
 		"rights": schema.ListNestedAttribute{Required: true, Description: "Complete ordered app ACL, not an additive grant. Preserve the provisioning user's management access. Array order controls precedence. Omitted flags are false.", NestedObject: schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
 			"entity_type":  schema.StringAttribute{Required: true, Description: "USER, GROUP, ORGANIZATION or CREATOR."},
 			"entity_code":  schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("")},
@@ -177,12 +188,49 @@ func (r *AppResource) Create(ctx context.Context, req resource.CreateRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	fields, records, err := initialFixtures(m)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid initialization data", err.Error())
+		return
+	}
+	m.InitialRecordIDs = types.StringValue("[]")
+	m.InitialStage = types.StringValue("creating")
+	if len(fields) > 0 || len(records) > 0 {
+		client, ok := r.client.(interface {
+			InitExercise(context.Context, string, string, json.RawMessage, []kintone.TextField, []map[string]kintone.FieldValue, func(kintone.ExerciseProgress) error) error
+		})
+		if !ok {
+			resp.Diagnostics.AddError("Initialization unsupported", "Provider client does not support exercise initialization.")
+			return
+		}
+		err = client.InitExercise(ctx, m.Name.ValueString(), m.Description.ValueString(), p, fields, records, func(progress kintone.ExerciseProgress) error {
+			m.ID = types.StringValue(progress.AppID)
+			ids := progress.RecordIDs
+			if ids == nil {
+				ids = []string{}
+			}
+			b, _ := json.Marshal(ids)
+			m.InitialRecordIDs = types.StringValue(string(b))
+			m.InitialStage = types.StringValue(progress.Stage)
+			ds := resp.State.Set(ctx, &m)
+			resp.Diagnostics.Append(ds...)
+			if ds.HasError() {
+				return fmt.Errorf("cannot checkpoint initialization state")
+			}
+			return nil
+		})
+		if err != nil {
+			resp.Diagnostics.AddError("Exercise initialization incomplete", "Inspect the recorded app ID, stage and record IDs before recovery. Do not automatically retry: remote changes may already exist. "+err.Error())
+		}
+		return
+	}
 	id, e := r.client.CreateApp(ctx, m.Name.ValueString())
 	if e != nil {
 		resp.Diagnostics.AddError("App creation failed", e.Error())
 		return
 	}
 	m.ID = types.StringValue(id)
+	m.InitialStage = types.StringValue("created")
 	// Preserve the ID before further remote operations; failures must not silently orphan an app.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 	if resp.Diagnostics.HasError() {
@@ -192,6 +240,8 @@ func (r *AppResource) Create(ctx context.Context, req resource.CreateRequest, re
 		resp.Diagnostics.AddError("App created but configuration incomplete", fmt.Sprintf("App %s is retained in state. Inspect its preview/deployment and recover manually before retrying. %s", id, e))
 		return
 	}
+	m.InitialStage = types.StringValue("ready")
+	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
 func (r *AppResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var m appModel
@@ -226,6 +276,18 @@ func (r *AppResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 	}
 	m.Name = types.StringValue(name)
 	m.Description = types.StringValue(description)
+	if m.InitialFields.IsNull() {
+		m.InitialFields = types.StringValue("[]")
+	}
+	if m.InitialRecords.IsNull() {
+		m.InitialRecords = types.StringValue("[]")
+	}
+	if m.InitialRecordIDs.IsNull() {
+		m.InitialRecordIDs = types.StringValue("[]")
+	}
+	if m.InitialStage.IsNull() {
+		m.InitialStage = types.StringValue("untracked")
+	}
 	if m.Retain.IsNull() {
 		m.Retain = types.BoolValue(false)
 	}
@@ -274,4 +336,34 @@ func (r *AppResource) ImportState(ctx context.Context, req resource.ImportStateR
 	}
 	req.ID = strconv.FormatUint(id, 10)
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// Parse creation-only fixture input strictly before any remote operation.
+func initialFixtures(m appModel) ([]kintone.TextField, []map[string]kintone.FieldValue, error) {
+	var fields []kintone.TextField
+	var records []map[string]kintone.FieldValue
+	decode := func(v types.String, out any) error {
+		if v.IsUnknown() {
+			return fmt.Errorf("initialization JSON must be known before creation")
+		}
+		if v.IsNull() || v.ValueString() == "" {
+			return nil
+		}
+		decoder := json.NewDecoder(bytes.NewBufferString(v.ValueString()))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(out); err != nil {
+			return fmt.Errorf("initialization JSON must match the documented field/record shape")
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return fmt.Errorf("initialization JSON must contain one value")
+		}
+		return nil
+	}
+	if err := decode(m.InitialFields, &fields); err != nil {
+		return nil, nil, err
+	}
+	if err := decode(m.InitialRecords, &records); err != nil {
+		return nil, nil, err
+	}
+	return fields, records, nil
 }

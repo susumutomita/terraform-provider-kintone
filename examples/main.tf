@@ -21,6 +21,15 @@ variable "sales_group" {
 resource "kintone_app" "exercise" {
   name        = "TenkaCloud ACL prototype"
   description = ""
+  # Creation-only fixtures; changes require replacement (blocked by default).
+  initial_fields_json = jsonencode([
+    { code = "customer_name", label = "架空顧客名" },
+    { code = "department", label = "担当部署" }
+  ])
+  initial_records_json = jsonencode([
+    { customer_name = { value = "架空商店A" }, department = { value = "営業" } },
+    { customer_name = { value = "架空工房B" }, department = { value = "営業" } }
+  ])
   rights = [
     {
       entity_type      = "USER"
@@ -49,4 +58,8 @@ resource "kintone_app" "exercise" {
 }
 output "app_id" {
   value = kintone_app.exercise.id
+}
+
+output "initial_stage" {
+  value = kintone_app.exercise.initial_stage
 }
